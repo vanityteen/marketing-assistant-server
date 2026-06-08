@@ -31,6 +31,15 @@ app.use('/api/leads', leadsRouter)
 app.use('/api/contacts', contactsRouter)
 app.use('/api/settings', settingsRouter)
 
+// 全局错误处理中间件 - 捕获 asyncHandler 抛出的异常
+app.use((err: Error, req: express.Request, res: express.Response, _next: express.NextFunction) => {
+  console.error(`❌ [${req.method} ${req.path}]`, err.message)
+  res.status(500).json({
+    error: '服务器内部错误，请稍后重试',
+    detail: process.env.NODE_ENV === 'development' ? err.message : undefined
+  })
+})
+
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`)
 })

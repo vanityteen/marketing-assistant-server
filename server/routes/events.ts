@@ -17,6 +17,16 @@ import QRCode from 'qrcode'
 const router = Router()
 
 /**
+ * 异步路由错误处理包装器
+ * Express 4 不会自动捕获 async handler 中的异常
+ */
+function asyncHandler(fn: (req: Request, res: Response, next: any) => Promise<any>) {
+  return (req: Request, res: Response, next: any) => {
+    fn(req, res, next).catch(next)
+  }
+}
+
+/**
  * 获取活动列表
  * 
  * GET /events
@@ -32,7 +42,7 @@ const router = Router()
  * 返回值：
  * - events: 活动列表数组，包含处理后的ROI和解析的表单字段
  */
-router.get('/', async (req: Request, res: Response) => {
+router.get('/', asyncHandler(async (req: Request, res: Response) => {
   const { status, search } = req.query
   let sql = 'SELECT e.*, COUNT(l.id) as lead_count FROM events e LEFT JOIN leads l ON l.event_id = e.id'
   const params: string[] = []
@@ -61,7 +71,7 @@ router.get('/', async (req: Request, res: Response) => {
   }))
 
   res.json({ events: result })
-})
+}))
 
 /**
  * 获取单个活动详情
@@ -79,7 +89,7 @@ router.get('/', async (req: Request, res: Response) => {
  * - event: 活动详细信息对象
  * - leads: 关联的线索列表（最多10条，按创建时间倒序）
  */
-router.get('/:id', async (req: Request, res: Response) => {
+router.get('/:id', asyncHandler(async (req: Request, res: Response) => {
   const event = await db.get(`
     SELECT e.*, COUNT(l.id) as lead_count
     FROM events e LEFT JOIN leads l ON l.event_id = e.id
@@ -95,7 +105,7 @@ router.get('/:id', async (req: Request, res: Response) => {
   const leads = await db.all('SELECT * FROM leads WHERE event_id = ? ORDER BY created_at DESC LIMIT 10', req.params.id)
 
   res.json({ event, leads })
-})
+}))
 
 /**
  * 创建新活动
@@ -118,7 +128,7 @@ router.get('/:id', async (req: Request, res: Response) => {
  * 返回值：
  * - event: 创建成功的活动对象（状态码201）
  */
-router.post('/', async (req: Request, res: Response) => {
+router.post('/', asyncHandler(async (req: Request, res: Response) => {
   const userId = (req.session as unknown as Record<string, unknown>).userId || 1
   const { name, start_date, end_date, budget, description, form_fields } = req.body
 
@@ -135,7 +145,7 @@ router.post('/', async (req: Request, res: Response) => {
   event.form_fields = JSON.parse((event.form_fields as string) || '[]')
 
   res.status(201).json({ event })
-})
+}))
 
 /**
  * 更新活动信息
@@ -162,7 +172,7 @@ router.post('/', async (req: Request, res: Response) => {
  * 返回值：
  * - event: 更新后的活动对象
  */
-router.put('/:id', async (req: Request, res: Response) => {
+router.put('/:id', asyncHandler(async (req: Request, res: Response) => {
   const { name, start_date, end_date, budget, expense, description, status, form_fields } = req.body
   const event = await db.get('SELECT * FROM events WHERE id = ?', req.params.id) as DBRow | undefined
   if (!event) return res.status(404).json({ error: '活动不存在' })
@@ -181,7 +191,7 @@ router.put('/:id', async (req: Request, res: Response) => {
   const updated = await db.get('SELECT * FROM events WHERE id = ?', req.params.id) as DBRow
   updated.form_fields = JSON.parse((updated.form_fields as string) || '[]')
   res.json({ event: updated })
-})
+}))
 
 /**
  * 删除活动及其关联数据
@@ -235,7 +245,7 @@ router.delete('/:id', async (req: Request, res: Response) => {
  * - qrcode: 二维码图片的Data URL
  * - url: 线索提交页面的完整URL
  */
-router.get('/:id/qrcode', async (req: Request, res: Response) => {
+router.get('/:id/qrcode', asyncHandler(async (req: Request, res: Response) => {
   const event = await db.get('SELECT * FROM events WHERE id = ?', req.params.id)
   if (!event) return res.status(404).json({ error: '活动不存在' })
 
@@ -251,6 +261,6 @@ router.get('/:id/qrcode', async (req: Request, res: Response) => {
   } catch (err) {
     res.status(500).json({ error: '二维码生成失败' })
   }
-})
+}))
 
 export default router

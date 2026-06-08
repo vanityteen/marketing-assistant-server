@@ -14,7 +14,10 @@ const pool = mysql.createPool({
   waitForConnections: true,                           // 当无可用连接时等待
   connectionLimit: 10,                                // 最大连接数
   queueLimit: 0,                                      // 等待队列长度限制（0表示无限制）
-  charset: 'utf8mb4'                                  // 字符集（支持 emoji 等）
+  charset: 'utf8mb4',                                 // 字符集（支持 emoji 等）
+  connectTimeout: 10000,                              // 连接超时（10秒）
+  enableKeepAlive: true,                              // 启用TCP保活探测
+  keepAliveInitialDelay: 10000                        // 保活探测初始延迟（10秒）
 })
 
 // 定义数据库查询结果的类型

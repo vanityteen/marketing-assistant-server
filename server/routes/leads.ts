@@ -12,36 +12,55 @@
  */
 
 import { Router, Request, Response } from 'express'
-import db from '../db'
+import db, { DBRow } from '../db'
 
 const router = Router()
 
 /**
+ * 异步路由错误处理包装器
+ * Express 4 不会自动捕获 async handler 中的异常，
+ * 此包装器确保所有数据库错误被正确捕获并返回 500 响应
+ */
+function asyncHandler(fn: (req: Request, res: Response, next: any) => Promise<any>) {
+  return (req: Request, res: Response, next: any) => {
+    fn(req, res, next).catch(next)
+  }
+}
+
+/**
  * 获取公共线索池
- * 
+ *
  * GET /leads/public
- * 
- * 功能：获取所有未被认领的线索（owner_id为NULL）
+ *
+ * 功能：获取所有可展示的公共线索
+ * - 未被认领的线索（owner_id为NULL）
+ * - 当前用户已放弃的线索（status为'abandoned'，方便重新领用）
  * - 返回线索列表及其关联的活动名称
  * - 同时返回统计信息：可用线索数、今日新增数、可回收线索数
  * - 可回收线索指：已被认领但超过回收天数且状态仍为pending的线索
- * 
+ *
  * 返回值：
  * - leads: 公共线索列表（按创建时间倒序）
  * - stats: 统计信息对象（available, today, recovery）
  */
-router.get('/public', async (req: Request, res: Response) => {
+router.get('/public', asyncHandler(async (req: Request, res: Response) => {
+  const userId = (req.session as unknown as Record<string, unknown>).userId || 1
+
   const leads = await db.all(`
     SELECT l.*, e.name as event_name
     FROM leads l
     LEFT JOIN events e ON l.event_id = e.id
     WHERE l.owner_id IS NULL
+       OR (l.owner_id = ? AND l.status = 'abandoned')
     ORDER BY l.created_at DESC
-  `)
+  `, userId)
 
   const [available, today, recovery] = await Promise.all([
-    db.get("SELECT COUNT(*) as count FROM leads WHERE owner_id IS NULL"),
-    db.get("SELECT COUNT(*) as count FROM leads WHERE owner_id IS NULL AND DATE(created_at) = CURDATE()"),
+    db.get(`SELECT COUNT(*) as count FROM leads WHERE owner_id IS NULL
+       OR (owner_id = ? AND status = 'abandoned')`, userId),
+    db.get(`SELECT COUNT(*) as count FROM leads
+      WHERE (owner_id IS NULL OR (owner_id = ? AND status = 'abandoned'))
+      AND DATE(created_at) = CURDATE()`, userId),
     db.get(`
       SELECT COUNT(*) as count FROM leads
       WHERE owner_id IS NOT NULL AND status = 'pending'
@@ -58,7 +77,7 @@ router.get('/public', async (req: Request, res: Response) => {
   }
 
   res.json({ leads, stats })
-})
+}))
 
 /**
  * 获取个人线索列表
@@ -77,7 +96,7 @@ router.get('/public', async (req: Request, res: Response) => {
  * - leads: 个人线索列表（按创建时间倒序）
  * - stats: 各状态的线索数量统计
  */
-router.get('/personal', async (req: Request, res: Response) => {
+router.get('/personal', asyncHandler(async (req: Request, res: Response) => {
   const userId = (req.session as unknown as Record<string, unknown>).userId || 1
   const { status } = req.query
 
@@ -114,11 +133,51 @@ router.get('/personal', async (req: Request, res: Response) => {
   }
 
   res.json({ leads, stats })
-})
+}))
+
+/**
+ * 获取单个线索详情
+ *
+ * GET /leads/:id
+ *
+ * 功能：获取指定线索的完整信息
+ * - 包含关联的活动名称
+ * - 解析 custom_data JSON 字符串为对象
+ * - 公开和已认领的线索均可查询
+ *
+ * 路径参数：
+ * - id: 线索ID
+ *
+ * 返回值：
+ * - lead: 线索详情对象（包含 custom_data 表单字段）
+ */
+router.get('/:id', asyncHandler(async (req: Request, res: Response) => {
+  const lead = await db.get(`
+    SELECT l.*, e.name as event_name
+    FROM leads l
+    LEFT JOIN events e ON l.event_id = e.id
+    WHERE l.id = ?
+  `, req.params.id)
+
+  if (!lead) {
+    return res.status(404).json({ error: '线索不存在' })
+  }
+
+  // 解析 custom_data JSON 字符串为对象
+  if (typeof lead.custom_data === 'string') {
+    try {
+      lead.custom_data = JSON.parse(lead.custom_data)
+    } catch {
+      lead.custom_data = {}
+    }
+  }
+
+  res.json({ lead })
+}))
 
 /**
  * 认领线索
- * 
+ *
  * POST /leads/:id/claim
  * 
  * 功能：将公共线索池中的线索认领给当前用户
@@ -133,7 +192,7 @@ router.get('/personal', async (req: Request, res: Response) => {
  * - lead: 认领后的线索对象
  * - message: 认领成功消息
  */
-router.post('/:id/claim', async (req: Request, res: Response) => {
+router.post('/:id/claim', asyncHandler(async (req: Request, res: Response) => {
   const userId = (req.session as unknown as Record<string, unknown>).userId || 1
   const lead = await db.get('SELECT * FROM leads WHERE id = ?', req.params.id)
 
@@ -143,7 +202,7 @@ router.post('/:id/claim', async (req: Request, res: Response) => {
   await db.run("UPDATE leads SET owner_id = ?, claimed_at = NOW() WHERE id = ?", userId, req.params.id)
   const updated = await db.get('SELECT * FROM leads WHERE id = ?', req.params.id)
   res.json({ lead: updated, message: '线索领用成功' })
-})
+}))
 
 /**
  * 线索跟进
@@ -167,7 +226,7 @@ router.post('/:id/claim', async (req: Request, res: Response) => {
  * - lead: 更新后的线索对象
  * - message: 跟进记录保存成功消息
  */
-router.post('/:id/follow', async (req: Request, res: Response) => {
+router.post('/:id/follow', asyncHandler(async (req: Request, res: Response) => {
   const userId = (req.session as unknown as Record<string, unknown>).userId || 1
   const { status, rating, note } = req.body
   const lead = await db.get('SELECT * FROM leads WHERE id = ?', req.params.id)
@@ -186,7 +245,7 @@ router.post('/:id/follow', async (req: Request, res: Response) => {
 
   const updated = await db.get('SELECT * FROM leads WHERE id = ?', req.params.id)
   res.json({ lead: updated, message: '跟进记录已保存' })
-})
+}))
 
 /**
  * 获取线索跟进历史
@@ -203,7 +262,7 @@ router.post('/:id/follow', async (req: Request, res: Response) => {
  * 返回值：
  * - followUps: 跟进记录列表（包含用户信息）
  */
-router.get('/:id/follow-ups', async (req: Request, res: Response) => {
+router.get('/:id/follow-ups', asyncHandler(async (req: Request, res: Response) => {
   const followUps = await db.all(`
     SELECT f.*, u.name as user_name
     FROM follow_ups f
@@ -213,7 +272,7 @@ router.get('/:id/follow-ups', async (req: Request, res: Response) => {
   `, req.params.id)
 
   res.json({ followUps })
-})
+}))
 
 /**
  * 提交线索（公开表单）
@@ -234,7 +293,7 @@ router.get('/:id/follow-ups', async (req: Request, res: Response) => {
  * 返回值：
  * - message: 提交成功消息（状态码201）
  */
-router.post('/submit', async (req: Request, res: Response) => {
+router.post('/submit', asyncHandler(async (req: Request, res: Response) => {
   const { event_id, name, phone, custom_data } = req.body
 
   if (!event_id || !name || !phone) {
@@ -249,7 +308,24 @@ router.post('/submit', async (req: Request, res: Response) => {
     VALUES (?, ?, ?, ?)
   `, name, phone, event_id, JSON.stringify(custom_data || {}))
 
+  // ==================== 终端日志输出 ====================
+  console.log('\n═══════════════════════════════════════════')
+  console.log('  📋 新线索提交')
+  console.log('───────────────────────────────────────────')
+  console.log(`  🏷️  活动:  ${(event as DBRow).name}`)
+  console.log(`  👤  姓名:  ${name}`)
+  console.log(`  📞  电话:  ${phone}`)
+  if (custom_data && typeof custom_data === 'object') {
+    console.log('  ── 自定义字段 ──')
+    for (const [key, value] of Object.entries(custom_data)) {
+      console.log(`    ${key}: ${value}`)
+    }
+  }
+  console.log(`  🕐  时间:  ${new Date().toLocaleString('zh-CN')}`)
+  console.log('═══════════════════════════════════════════\n')
+  // ===================================================
+
   res.status(201).json({ message: '信息提交成功' })
-})
+}))
 
 export default router
